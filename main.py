@@ -20,3 +20,7 @@ def get_bq_client():
         yield client
     finally:
         client.close()
+
+@app.get("/")
+def read_root():
+    return {"status": "healthy"}

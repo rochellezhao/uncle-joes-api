@@ -2,7 +2,7 @@
 name = "uncle-joes-api"
 version = "0.1.0"
 description = "Uncle Joes Coffee App - Backend API"
-authors = [Eric Zhang]
+authors = ["Eric Zhang"]
 package-mode = false
 
 [tool.poetry.dependencies]
