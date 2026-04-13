@@ -1,0 +1,16 @@
+[tool.poetry]
+name = "uncle-joes-api"
+version = "0.1.0"
+description = "Uncle Joes Coffee App - Backend API"
+authors = [Eric Zhang]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.109.0"
+uvicorn = {extras = ["standard"], version = "^0.29.0"}
+google-cloud-bigquery = "^3.20.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
