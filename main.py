@@ -102,5 +102,3 @@ def get_location_detail(location_id: str, bq: bigquery.Client = Depends(get_bq_c
             status_code=500, 
             detail=f"BigQuery Error: {str(e)}"
         )
-
-#boom
