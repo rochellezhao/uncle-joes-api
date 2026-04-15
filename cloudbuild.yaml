@@ -1,23 +1,39 @@
 steps:
+  # 1. Build the container
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/uncle-joes-repo/uncle-joes-api:$COMMIT_SHA', '.']
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/uncle-joes-api:$COMMIT_SHA', '.']
 
+  # 2. Push the image
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/uncle-joes-repo/uncle-joes-api:$COMMIT_SHA']
+    args: ['push', 'gcr.io/$PROJECT_ID/uncle-joes-api:$COMMIT_SHA']
 
+  # 3. Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
-      - run
-      - deploy
-      - uncle-joes-api
-      - --image=us-central1-docker.pkg.dev/$PROJECT_ID/uncle-joes-repo/uncle-joes-api:$COMMIT_SHA
-      - --region=us-central1
-      - --platform=managed
-      - --allow-unauthenticated
+      - 'run'
+      - 'deploy'
+      - 'uncle-joes-api'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/uncle-joes-api:$COMMIT_SHA'
+      - '--region'
+      - 'us-central1'
+      - '--allow-unauthenticated'
+
+  # 4. FORCE TRAFFIC TO 100% (The automation fix)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'services'
+      - 'update-traffic'
+      - 'uncle-joes-api'
+      - '--to-latest'
+      - '--region'
+      - 'us-central1'
 
 images:
-  - 'us-central1-docker.pkg.dev/$PROJECT_ID/uncle-joes-repo/uncle-joes-api:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/uncle-joes-api:$COMMIT_SHA'
 
 options:
   logging: CLOUD_LOGGING_ONLY
