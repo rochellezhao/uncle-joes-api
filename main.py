@@ -50,23 +50,3 @@ def get_locations(bq: bigquery.Client = Depends(get_bq_client)):
         return {"total": len(results), "locations": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"BigQuery Error: {str(e)}")
-
-@app.get("/locations/{store_id}")
-def get_store_detail(store_id: str, bq: bigquery.Client = Depends(get_bq_client)):
-    # Using parameterized query to safely handle the store_id
-    query = f"SELECT * FROM `{FULL_PATH}.locations` WHERE store_id = @sid"
-    
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("sid", "STRING", store_id)]
-    )
-    
-    try:
-        query_job = bq.query(query, job_config=job_config)
-        results = [dict(row) for row in query_job]
-        
-        if not results:
-            raise HTTPException(status_code=404, detail=f"Store ID {store_id} not found")
-            
-        return results[0]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"BigQuery Error: {str(e)}")
