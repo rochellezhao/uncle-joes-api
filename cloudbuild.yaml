@@ -1,13 +1,11 @@
 steps:
-  # 1. Build the container
+  # 1. Build & Push
   - name: 'gcr.io/cloud-builders/docker'
     args: ['build', '-t', 'gcr.io/$PROJECT_ID/uncle-joes-api:$COMMIT_SHA', '.']
-
-  # 2. Push the image
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'gcr.io/$PROJECT_ID/uncle-joes-api:$COMMIT_SHA']
 
-  # 3. Deploy to Cloud Run
+  # 2. Deploy (The "Update" step)
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -20,7 +18,7 @@ steps:
       - 'us-central1'
       - '--allow-unauthenticated'
 
-  # 4. FORCE TRAFFIC TO 100% (The automation fix)
+  # 3. THE MAGIC STEP: Flip the switch to 100%
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
@@ -31,9 +29,3 @@ steps:
       - '--to-latest'
       - '--region'
       - 'us-central1'
-
-images:
-  - 'gcr.io/$PROJECT_ID/uncle-joes-api:$COMMIT_SHA'
-
-options:
-  logging: CLOUD_LOGGING_ONLY
