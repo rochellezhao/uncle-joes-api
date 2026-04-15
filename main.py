@@ -28,3 +28,5 @@ def get_bq_client():
 @app.get("/")
 def read_root():
     return {"status": "healthy"}
+
+#here
