@@ -42,11 +42,15 @@ def get_menu(bq: bigquery.Client = Depends(get_bq_client)):
 # --- LOCATIONS ENDPOINTS ---
 @app.get("/locations")
 def get_locations(bq: bigquery.Client = Depends(get_bq_client)):
-    # Try selecting * first to see all available columns if you're unsure
-    query = f"SELECT * FROM `{FULL_PATH}.locations` LIMIT 10"
+    query = f"""
+        SELECT id, name, city, state, status 
+        FROM `{FULL_PATH}.locations`
+        ORDER BY name ASC
+    """
     try:
         query_job = bq.query(query)
         results = [dict(row) for row in query_job]
         return {"total": len(results), "locations": results}
     except Exception as e:
+        # If 'id' is still wrong, this will tell us the next best guess
         raise HTTPException(status_code=500, detail=f"BigQuery Error: {str(e)}")
