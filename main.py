@@ -14,6 +14,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
 DATA_PROJECT = "uncle-joes-coffee-company" 
 DATASET = "uncle_joes"
 FULL_PATH = f"{DATA_PROJECT}.{DATASET}"
@@ -128,3 +132,45 @@ def get_location_detail(location_id: str, bq: bigquery.Client = Depends(get_bq_c
             status_code=500, 
             detail=f"BigQuery Error: {str(e)}"
         )
+@app.post("/login")
+def login_member(login_data: LoginRequest, bq: bigquery.Client = Depends(get_bq_client)):
+    """
+    Verifies if the email exists and matches the shared pilot password: Coffee123!
+    """
+    SHARED_PILOT_PASSWORD = "Coffee123!"
+    
+    # First, verify the password the user typed matches the pilot password
+    if login_data.password != SHARED_PILOT_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid password for pilot program")
+
+    # Second, check if the email actually exists in our member database
+    query = f"""
+        SELECT first_name, last_name, email, member_level, points
+        FROM `{FULL_PATH}.members` 
+        WHERE email = @email
+        LIMIT 1
+    """
+    
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("email", "STRING", login_data.email)
+        ]
+    )
+    
+    try:
+        query_job = bq.query(query, job_config=job_config)
+        results = [dict(row) for row in query_job]
+        
+        if not results:
+            raise HTTPException(status_code=401, detail="Email not found in Coffee Club")
+            
+        user = results[0]
+        
+        return {
+            "status": "success",
+            "message": f"Login successful! Welcome to the pilot, {user['first_name']}.",
+            "user_profile": user
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BigQuery Error: {str(e)}")
