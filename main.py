@@ -63,6 +63,8 @@ def get_menu(category: str = None, bq: bigquery.Client = Depends(get_bq_client))
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"BigQuery Error: {str(e)}")
+#check
+
 # --- LOCATIONS ENDPOINTS ---
 @app.get("/locations")
 def get_locations(bq: bigquery.Client = Depends(get_bq_client)):
