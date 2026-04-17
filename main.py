@@ -31,12 +31,36 @@ def read_root():
 
 # --- MENU ENDPOINT ---
 @app.get("/menu")
-def get_menu(bq: bigquery.Client = Depends(get_bq_client)):
-    query = f"SELECT name, price, category FROM `{FULL_PATH}.menu_items` LIMIT 20"
+def get_menu(category: str = None, bq: bigquery.Client = Depends(get_bq_client)):
+    """
+    Returns menu items with names, prices, sizes, and calories.
+    Optional filter: /menu?category=Espresso
+    """
+    # Selecting columns based on your image_74cb6a.png preview
+    query = f"SELECT name, category, size, calories, price FROM `{FULL_PATH}.menu_items`"
+    
+    job_config = None
+    if category:
+        # Using @cat to safely handle the category string
+        query += " WHERE category = @cat"
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("cat", "STRING", category)
+            ]
+        )
+    
+    # Ordering by name and size to keep the list organized
+    query += " ORDER BY name ASC, price ASC LIMIT 50"
+    
     try:
-        query_job = bq.query(query)
+        query_job = bq.query(query, job_config=job_config)
         results = [dict(row) for row in query_job]
-        return {"items": results}
+        
+        return {
+            "category_filter": category if category else "all",
+            "count": len(results),
+            "items": results
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"BigQuery Error: {str(e)}")
 # --- LOCATIONS ENDPOINTS ---
@@ -102,5 +126,3 @@ def get_location_detail(location_id: str, bq: bigquery.Client = Depends(get_bq_c
             status_code=500, 
             detail=f"BigQuery Error: {str(e)}"
         )
-
-#comment
