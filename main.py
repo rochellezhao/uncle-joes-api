@@ -27,7 +27,7 @@ def get_bq_client():
 
 @app.get("/")
 def read_root():
-    return {"status": "healthy", "message": "Uncle Joe's API is online. Great Success!"}
+    return {"status": "healthy", "message": "Uncle Joe's API is online. Great Success! Did it work?"}
 
 # --- MENU ENDPOINT ---
 @app.get("/menu")
