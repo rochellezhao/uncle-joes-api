@@ -135,17 +135,18 @@ def get_location_detail(location_id: str, bq: bigquery.Client = Depends(get_bq_c
 @app.post("/login")
 def login_member(login_data: LoginRequest, bq: bigquery.Client = Depends(get_bq_client)):
     """
-    Verifies if the email exists and matches the shared pilot password: Coffee123!
+    Pilot Login: Verifies email exists in members table and checks against 
+    the shared pilot password: Coffee123!
     """
     SHARED_PILOT_PASSWORD = "Coffee123!"
     
-    # First, verify the password the user typed matches the pilot password
+    # 1. Password Guard
     if login_data.password != SHARED_PILOT_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid password for pilot program")
 
-    # Second, check if the email actually exists in our member database
+    # 2. Database Lookup (matching your exact schema)
     query = f"""
-        SELECT first_name, last_name, email, member_level, points
+        SELECT first_name, last_name, email, home_store, phone_number
         FROM `{FULL_PATH}.members` 
         WHERE email = @email
         LIMIT 1
