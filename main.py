@@ -27,7 +27,7 @@ def get_bq_client():
 
 @app.get("/")
 def read_root():
-    return {"status": "healthy", "message": "Uncle Joe's API is online"}
+    return {"status": "healthy", "message": "Uncle Joe's API is online. Great Success!"}
 
 # --- MENU ENDPOINT ---
 @app.get("/menu")
@@ -102,3 +102,5 @@ def get_location_detail(location_id: str, bq: bigquery.Client = Depends(get_bq_c
             status_code=500, 
             detail=f"BigQuery Error: {str(e)}"
         )
+
+#comment
