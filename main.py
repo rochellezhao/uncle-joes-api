@@ -30,12 +30,17 @@ def get_bq_client():
         yield client
     finally:
         client.close()
+class UpdateMemberRequest(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone_number: Optional[str] = None
+    home_store: Optional[str] = None
 
 @app.get("/")
 def read_root():
     return {"status": "healthy", "message": "Uncle Joe's API is online. Great Success! Did it work?"}
 
-# --- MENU ENDPOINT ---
+# --- PUBLIC: MENU ENDPOINT ---
 @app.get("/menu")
 def get_menu(category: str = None, bq: bigquery.Client = Depends(get_bq_client)):
     """
@@ -69,7 +74,36 @@ def get_menu(category: str = None, bq: bigquery.Client = Depends(get_bq_client))
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"BigQuery Error: {str(e)}")
+# --- PUBLIC: MENU CATEGORIES ---
+@app.get("/menu/categories")
+def get_menu_categories(bq: bigquery.Client = Depends(get_bq_client)):
+    """
+    Returns a clean list of unique categories available in the menu.
+    Useful for building navigation tabs or filters on the frontend.
+    """
+    query = f"""
+        SELECT DISTINCT category 
+        FROM `{FULL_PATH}.menu_items` 
+        WHERE category IS NOT NULL 
+        ORDER BY category ASC
+    """
+    
+    try:
+        query_job = bq.query(query)
+        # We extract the string from the row object to return a simple list
+        categories = [row.category for row in query_job]
+        
+        return {
+            "status": "success",
+            "count": len(categories),
+            "categories": categories
+        }
 
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error fetching categories: {str(e)}"
+        )
 # --- LOCATIONS ENDPOINTS ---
 @app.get("/locations")
 def get_locations(bq: bigquery.Client = Depends(get_bq_client)):
@@ -179,7 +213,7 @@ def login_member(login_data: LoginRequest, bq: bigquery.Client = Depends(get_bq_
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"BigQuery Error: {str(e)}")
 
-# --- 4. MEMBER: PROFILE & STATS (The Dashboard Engine) ---
+# --- MEMBER: PROFILE & STATS (The Dashboard Engine) ---
 @app.get("/members/{member_id}")
 def get_member_profile(member_id: str, bq: bigquery.Client = Depends(get_bq_client)):
     query = f"""
@@ -198,7 +232,7 @@ def get_member_profile(member_id: str, bq: bigquery.Client = Depends(get_bq_clie
     if not results: raise HTTPException(status_code=404, detail="Member not found")
     return results[0]
 
-# --- 5. MEMBER: ORDER HISTORY ---
+# --- MEMBER: ORDER HISTORY ---
 @app.get("/members/{member_id}/orders")
 def get_order_history(
     member_id: str, 
@@ -241,8 +275,8 @@ def get_order_history(
         # 3. Format the date to look clean in JSON
         for row in results:
             if row.get('order_date'):
-                row['order_date'] = row['order_date'].isoformat() if row['order_date'] else None
-                
+                row['order_date'] = row['order_date'].strftime('%Y-%m-%d %H:%M')
+
         return {
             "member_id": member_id,
             "order_count": len(results),
@@ -256,7 +290,48 @@ def get_order_history(
             detail=f"BigQuery Order History Error: {str(e)}"
         )
 
-# --- 6. MEMBER: ORDER DETAILS ---
+# --- MEMBER: UPDATE PROFILE ---
+@app.patch("/members/{member_id}")
+def update_member_profile(member_id: str, data: UpdateMemberRequest, bq: bigquery.Client = Depends(get_bq_client)):
+    """
+    Updates specific fields for a member. Only provided fields will be changed.
+    """
+    # 1. Build the SET clause dynamically based on what was provided
+    updates = []
+    params = [bigquery.ScalarQueryParameter("mid", "STRING", member_id)]
+    
+    if data.first_name:
+        updates.append("first_name = @fname")
+        params.append(bigquery.ScalarQueryParameter("fname", "STRING", data.first_name))
+    if data.last_name:
+        updates.append("last_name = @lname")
+        params.append(bigquery.ScalarQueryParameter("lname", "STRING", data.last_name))
+    if data.phone_number:
+        updates.append("phone_number = @phone")
+        params.append(bigquery.ScalarQueryParameter("phone", "STRING", data.phone_number))
+    if data.home_store:
+        updates.append("home_store = @hstore")
+        params.append(bigquery.ScalarQueryParameter("hstore", "STRING", data.home_store))
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No update data provided")
+
+    # 2. Execute the UPDATE in BigQuery
+    query = f"""
+        UPDATE `{FULL_PATH}.members`
+        SET {', '.join(updates)}
+        WHERE id = @mid
+    """
+    
+    try:
+        query_job = bq.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params))
+        query_job.result() # Wait for the update to finish
+        
+        return {"status": "success", "message": "Profile updated successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- MEMBER: ORDER DETAILS ---
 @app.get("/orders/{order_id}")
 def get_order_details(order_id: str, bq: bigquery.Client = Depends(get_bq_client)):
     query = f"SELECT item_name, size, quantity, price FROM `{FULL_PATH}.order_items` WHERE order_id = @oid"
@@ -309,3 +384,4 @@ def get_member_points(member_id: str, bq: bigquery.Client = Depends(get_bq_clien
             status_code=500, 
             detail=f"Points Calculation Error: {str(e)}"
         )
+
