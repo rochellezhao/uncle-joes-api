@@ -198,41 +198,61 @@ def get_member_profile(member_id: str, bq: bigquery.Client = Depends(get_bq_clie
 
 # --- 5. MEMBER: ORDER HISTORY ---
 @app.get("/members/{member_id}/orders")
-def get_order_history(member_id: str, limit: Optional[int] = None, bq: bigquery.Client = Depends(get_bq_client)):
+def get_order_history(
+    member_id: str, 
+    limit: Optional[int] = None, 
+    bq: bigquery.Client = Depends(get_bq_client)
+):
     """
-    Returns the member's order history. 
-    If no limit is provided, it returns up to 1000 orders (essentially 'all' for this pilot).
+    Fetches the full order history for a member.
+    Joins with Locations table to get the store's city/state.
     """
     query = f"""
         SELECT 
-            o.order_id, o.order_date, o.order_total, 
-            l.city, l.state
+            o.order_id, 
+            o.order_date, 
+            o.order_total, 
+            l.city, 
+            l.state
         FROM `{FULL_PATH}.orders` AS o
-        JOIN `{FULL_PATH}.locations` AS l ON o.store_id = l.id
+        LEFT JOIN `{FULL_PATH}.locations` AS l ON o.store_id = l.id
         WHERE o.member_id = @mid
         ORDER BY o.order_date DESC
     """
-    final_limit = limit if limit else 1000
-    query += " LIMIT @limit"
     
-    params = [
-        bigquery.ScalarQueryParameter("mid", "STRING", member_id),
-        bigquery.ScalarQueryParameter("limit", "INTEGER", final_limit)
-    ]
+    params = [bigquery.ScalarQueryParameter("mid", "STRING", member_id)]
     
+    if limit:
+        query += " LIMIT @limit"
+        params.append(bigquery.ScalarQueryParameter("limit", "INTEGER", limit))
+    else:
+        # Safety ceiling for the pilot
+        query += " LIMIT 1000"
+        params.append(bigquery.ScalarQueryParameter("limit", "INTEGER", 1000))
+
     job_config = bigquery.QueryJobConfig(query_parameters=params)
     
     try:
         query_job = bq.query(query, job_config=job_config)
         results = [dict(row) for row in query_job]
         
+        # 3. Format the date to look clean in JSON
+        for row in results:
+            if row.get('order_date'):
+                row['order_date'] = row['order_date'].strftime('%Y-%m-%d %H:%M')
+
         return {
             "member_id": member_id,
-            "total_returned": len(results),
+            "order_count": len(results),
             "orders": results
         }
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # This will tell us if there's a specific BigQuery table error
+        raise HTTPException(
+            status_code=500, 
+            detail=f"BigQuery Order History Error: {str(e)}"
+        )
 
 # --- 6. MEMBER: ORDER DETAILS ---
 @app.get("/orders/{order_id}")
