@@ -67,7 +67,6 @@ def get_menu(category: str = None, bq: bigquery.Client = Depends(get_bq_client))
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"BigQuery Error: {str(e)}")
-#check
 
 # --- LOCATIONS ENDPOINTS ---
 @app.get("/locations")
@@ -132,6 +131,8 @@ def get_location_detail(location_id: str, bq: bigquery.Client = Depends(get_bq_c
             status_code=500, 
             detail=f"BigQuery Error: {str(e)}"
         )
+
+# --- LOGIN ENDPOINTS ---
 @app.post("/login")
 def login_member(login_data: LoginRequest, bq: bigquery.Client = Depends(get_bq_client)):
     """
@@ -144,7 +145,7 @@ def login_member(login_data: LoginRequest, bq: bigquery.Client = Depends(get_bq_
     if login_data.password != SHARED_PILOT_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid password for pilot program")
 
-    # 2. Database Lookup (matching your exact schema)
+    # 2. Database Lookup
     query = f"""
         SELECT first_name, last_name, email, home_store, phone_number
         FROM `{FULL_PATH}.members` 
@@ -175,3 +176,52 @@ def login_member(login_data: LoginRequest, bq: bigquery.Client = Depends(get_bq_
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"BigQuery Error: {str(e)}")
+
+# --- 4. MEMBER: PROFILE & STATS (The Dashboard Engine) ---
+@app.get("/members/{member_id}")
+def get_member_profile(member_id: str, bq: bigquery.Client = Depends(get_bq_client)):
+    query = f"""
+        SELECT 
+            m.id, m.first_name, m.last_name, m.email, m.phone_number, m.home_store,
+            COUNT(o.order_id) as total_orders,
+            IFNULL(SUM(FLOOR(o.order_total)), 0) as total_points
+        FROM `{FULL_PATH}.members` AS m
+        LEFT JOIN `{FULL_PATH}.orders` AS o ON m.id = o.member_id
+        WHERE m.id = @mid
+        GROUP BY 1, 2, 3, 4, 5, 6
+    """
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("mid", "STRING", member_id)])
+    query_job = bq.query(query, job_config=job_config)
+    results = [dict(row) for row in query_job]
+    if not results: raise HTTPException(status_code=404, detail="Member not found")
+    return results[0]
+
+# --- 5. MEMBER: ORDER HISTORY ---
+@app.get("/members/{member_id}/orders")
+def get_order_history(member_id: str, limit: int = 10, bq: bigquery.Client = Depends(get_bq_client)):
+    query = f"""
+        SELECT 
+            o.order_id, o.order_date, o.order_total, 
+            l.city, l.state
+        FROM `{FULL_PATH}.orders` AS o
+        JOIN `{FULL_PATH}.locations` AS l ON o.store_id = l.id
+        WHERE o.member_id = @mid
+        ORDER BY o.order_date DESC
+        LIMIT @limit
+    """
+    job_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("mid", "STRING", member_id),
+        bigquery.ScalarQueryParameter("limit", "INTEGER", limit)
+    ])
+    query_job = bq.query(query, job_config=job_config)
+    return {"orders": [dict(row) for row in query_job]}
+
+# --- 6. MEMBER: ORDER DETAILS ---
+@app.get("/orders/{order_id}")
+def get_order_details(order_id: str, bq: bigquery.Client = Depends(get_bq_client)):
+    query = f"SELECT item_name, size, quantity, price FROM `{FULL_PATH}.order_items` WHERE order_id = @oid"
+    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("oid", "STRING", order_id)])
+    query_job = bq.query(query, job_config=job_config)
+    results = [dict(row) for row in query_job]
+    if not results: raise HTTPException(status_code=404, detail="Order items not found")
+    return {"order_id": order_id, "items": results}
