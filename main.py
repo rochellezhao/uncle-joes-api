@@ -2,6 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from google.cloud import bigquery
 from pydantic import BaseModel
+from typing import Optional
 from typing import List
 
 app = FastAPI(title="Uncle Joes API")
