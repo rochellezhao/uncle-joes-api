@@ -104,6 +104,45 @@ def get_menu_categories(bq: bigquery.Client = Depends(get_bq_client)):
             status_code=500, 
             detail=f"Error fetching categories: {str(e)}"
         )
+@app.get("/menu/{item_id}")
+def get_menu_item(item_id: str, bq: bigquery.Client = Depends(get_bq_client)):
+    """
+    Retrieves the full details of a specific menu item using its unique ID.
+    Used for the "Product Detail" view on the frontend.
+    """
+    # We select all columns so Rochelle has access to calories, price, category, etc.
+    query = f"""
+        SELECT * FROM `{FULL_PATH}.menu_items` 
+        WHERE id = @iid
+    """
+    
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("iid", "STRING", item_id)
+        ]
+    )
+    
+    try:
+        query_job = bq.query(query, job_config=job_config)
+        results = [dict(row) for row in query_job]
+        
+        # If no item is found with that ID, we tell the frontend explicitly
+        if not results:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Menu item with ID {item_id} not found."
+            )
+            
+        return {
+            "status": "success",
+            "item": results[0]
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"BigQuery Error: {str(e)}"
+        )
 # --- LOCATIONS ENDPOINTS ---
 @app.get("/locations")
 def get_locations(bq: bigquery.Client = Depends(get_bq_client)):
