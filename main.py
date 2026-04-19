@@ -4,6 +4,7 @@ from google.cloud import bigquery
 from pydantic import BaseModel
 from typing import Optional
 from typing import List
+import datetime
 
 app = FastAPI(title="Uncle Joes API")
 
@@ -240,8 +241,8 @@ def get_order_history(
         # 3. Format the date to look clean in JSON
         for row in results:
             if row.get('order_date'):
-                row['order_date'] = row['order_date'].strftime('%Y-%m-%d %H:%M')
-
+                row['order_date'] = row['order_date'].isoformat() if row['order_date'] else None
+                
         return {
             "member_id": member_id,
             "order_count": len(results),
@@ -264,3 +265,47 @@ def get_order_details(order_id: str, bq: bigquery.Client = Depends(get_bq_client
     results = [dict(row) for row in query_job]
     if not results: raise HTTPException(status_code=404, detail="Order items not found")
     return {"order_id": order_id, "items": results}
+
+# --- MEMBER: LOYALTY POINTS ---
+@app.get("/members/{member_id}/points")
+def get_member_points(member_id: str, bq: bigquery.Client = Depends(get_bq_client)):
+    """
+    Calculates total loyalty points for a member.
+    Formula: SUM(FLOOR(order_total)) - 1 point per whole dollar spent.
+    """
+    # We use FLOOR to drop the cents before summing, as per your teammate's logic
+    query = f"""
+        SELECT 
+            IFNULL(SUM(FLOOR(order_total)), 0) as total_points,
+            COUNT(order_id) as total_orders
+        FROM `{FULL_PATH}.orders`
+        WHERE member_id = @mid
+    """
+    
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("mid", "STRING", member_id)
+        ]
+    )
+    
+    try:
+        query_job = bq.query(query, job_config=job_config)
+        results = [dict(row) for row in query_job]
+        
+        # Grab the data (or default to 0 if nothing is found)
+        data = results[0] if results else {"total_points": 0, "total_orders": 0}
+        
+        return {
+            "member_id": member_id,
+            "points_summary": {
+                "current_balance": int(data['total_points']),
+                "lifetime_orders": data['total_orders'],
+                "program_name": "Uncle Joe's Coffee Club"
+            }
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Points Calculation Error: {str(e)}"
+        )
