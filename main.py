@@ -15,7 +15,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+#URL
 class LoginRequest(BaseModel):
     email: str
     password: str
