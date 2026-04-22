@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from typing import Optional
 from typing import List
 import datetime
-
+import bcrypt 
 app = FastAPI(title="Uncle Joes API")
 
 app.add_middleware(
@@ -15,7 +15,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-#URL
+
 class LoginRequest(BaseModel):
     email: str
     password: str
@@ -211,18 +211,16 @@ def get_location_detail(location_id: str, bq: bigquery.Client = Depends(get_bq_c
 @app.post("/login")
 def login_member(login_data: LoginRequest, bq: bigquery.Client = Depends(get_bq_client)):
     """
-    Pilot Login: Verifies email exists in members table and checks against 
-    the shared pilot password: Coffee123!
+    Secure Login: Verifies the submitted password against the bcrypt hash 
+    retrieved from BigQuery.
     """
-    SHARED_PILOT_PASSWORD = "Coffee123!"
     
-    # 1. Password Guard
-    if login_data.password != SHARED_PILOT_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid password for pilot program")
+    # 1. Encode the submitted password for bcrypt processing
+    submitted_bytes = login_data.password.encode("utf-8")
 
-    # 2. Database Lookup
+    # 2. Database Lookup: We now fetch the 'password' hash column
     query = f"""
-        SELECT first_name, last_name, email, home_store, phone_number
+        SELECT id, first_name, last_name, email, home_store, phone_number, password
         FROM `{FULL_PATH}.members` 
         WHERE email = @email
         LIMIT 1
@@ -236,22 +234,34 @@ def login_member(login_data: LoginRequest, bq: bigquery.Client = Depends(get_bq_
     
     try:
         query_job = bq.query(query, job_config=job_config)
-        results = [dict(row) for row in query_job]
+        results = list(query_job.result())
         
         if not results:
-            raise HTTPException(status_code=401, detail="Email not found in Coffee Club")
+            # Standardized error message to prevent account enumeration
+            raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+        user = dict(results[0])
+        stored_hash = user["password"] # This is the bcrypt hash from DB
+
+        # 3. Verify the submitted password against the stored bcrypt hash
+        # Note: If users all have 'Coffee123!', the DB must store the HASH of that string.
+        if not bcrypt.checkpw(submitted_bytes, stored_hash.encode("utf-8")):
+            raise HTTPException(status_code=401, detail="Invalid email or password.")
             
-        user = results[0]
+        # 4. Clean up response: Remove the hash so it's never sent to the client
+        del user['password']
         
         return {
             "status": "success",
-            "message": f"Login successful! Welcome to the pilot, {user['first_name']}.",
+            "message": f"Login successful! Welcome back, {user['first_name']}.",
             "user_profile": user
         }
 
+    except HTTPException as he:
+        raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"BigQuery Error: {str(e)}")
-
+        
 # --- MEMBER: PROFILE & STATS (The Dashboard Engine) ---
 @app.get("/members/{member_id}")
 def get_member_profile(member_id: str, bq: bigquery.Client = Depends(get_bq_client)):
