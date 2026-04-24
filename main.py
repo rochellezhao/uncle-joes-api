@@ -222,7 +222,7 @@ def login_member(login_data: LoginRequest, bq: bigquery.Client = Depends(get_bq_
 
     # 2. Database Lookup
     query = f"""
-        SELECT first_name, last_name, email, home_store, phone_number
+        SELECT first_name, last_name, id, email, home_store, phone_number
         FROM `{FULL_PATH}.members` 
         WHERE email = @email
         LIMIT 1
