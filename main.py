@@ -740,13 +740,47 @@ def place_order_with_points(data: PlaceOrderRequest, bq: bigquery.Client = Depen
         )
         bq.query(update_bal_query, job_config=update_config).result()
 
-        # 4. Insert into ORDERS table ($0 totals)
+        # 4. Insert into ORDERS table ($0 totals because it's a points redemption)
         order_insert_query = f"""
             INSERT INTO `{FULL_PATH}.orders` 
             (order_id, member_id, store_id, order_date, items_subtotal, order_discount, order_subtotal, sales_tax, order_total)
             VALUES (@oid, @mid, @sid, @odate, 0, 0, 0, 0, 0)
         """
-        bq.query(order_insert_query, job_config=member_config).result() # Reusing mid/sid logic
+        # We need ALL four parameters here!
+        order_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("oid", "STRING", new_order_id),
+                bigquery.ScalarQueryParameter("mid", "STRING", data.member_id),
+                bigquery.ScalarQueryParameter("sid", "STRING", data.store_id),
+                bigquery.ScalarQueryParameter("odate", "STRING", order_timestamp),
+            ]
+        )
+        bq.query(order_insert_query, job_config=order_config).result()
+
+        # 5. Insert into ORDER_ITEMS table
+        items_insert_query = f"""
+            INSERT INTO `{FULL_PATH}.order_items` 
+            (id, order_id, menu_item_id, item_name, size, quantity, price) 
+            VALUES 
+        """
+        placeholders = []
+        item_params = [bigquery.ScalarQueryParameter("oid", "STRING", new_order_id)]
+        
+        for i, item in enumerate(order_items_to_insert):
+            suffix = f"_{i}"
+            placeholders.append(f"(@iid{suffix}, @oid, @mid{suffix}, @name{suffix}, @size{suffix}, @qty{suffix}, CAST(@price{suffix} AS NUMERIC))")
+            
+            item_params.extend([
+                bigquery.ScalarQueryParameter(f"iid{suffix}", "STRING", str(uuid.uuid4())),
+                bigquery.ScalarQueryParameter(f"mid{suffix}", "STRING", item['menu_item_id']),
+                bigquery.ScalarQueryParameter(f"name{suffix}", "STRING", item['item_name']),
+                bigquery.ScalarQueryParameter(f"size{suffix}", "STRING", item['size']),
+                bigquery.ScalarQueryParameter(f"qty{suffix}", "INTEGER", item['quantity']),
+                bigquery.ScalarQueryParameter(f"price{suffix}", "FLOAT", item['price'])
+            ])
+        
+        items_insert_query += ", ".join(placeholders)
+        bq.query(items_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=item_params)).result()
 
         # 5. Insert into ORDER_ITEMS table
         # [Insert the same order_items loop logic we used in the cash endpoint here]
