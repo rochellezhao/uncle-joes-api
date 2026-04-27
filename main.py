@@ -678,8 +678,12 @@ def place_order_with_points(data: PlaceOrderRequest, bq: bigquery.Client = Depen
 
     # 1. Lookup item prices
     item_ids = [item.item_id for item in data.items]
-    lookup_query = f"SELECT id, name, size, price FROM `{FULL_PATH}.menu_items` WHERE id IN UNNEST(@ids)"
-    
+    # Instead of calling the other endpoint, just run a direct query
+    lookup_query = f"""
+    SELECT loyalty_points, first_name 
+    FROM `{FULL_PATH}.members` 
+    WHERE id = @mid
+    """
     try:
         lookup_results = bq.query(lookup_query, job_config=bigquery.QueryJobConfig(
             query_parameters=[bigquery.ArrayQueryParameter("ids", "STRING", item_ids)])).result()
