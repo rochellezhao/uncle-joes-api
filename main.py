@@ -532,19 +532,22 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
         bq.query(order_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=order_params)).result()
 
         # --- 5. Update the ORDER_ITEMS table ---
-        items_insert_query = f"INSERT INTO `{FULL_PATH}.order_items` (order_id, item_name, size, quantity, price) VALUES "
+        # Added 'id' to the column list below
+        items_insert_query = f"INSERT INTO `{FULL_PATH}.order_items` (id, order_id, item_name, size, quantity, price) VALUES "
         placeholders = []
         
-        # Initialize item_params with the shared order_id
         item_params = [bigquery.ScalarQueryParameter("oid", "STRING", new_order_id)]
         
         for i, item in enumerate(order_items_to_insert):
             suffix = f"_{i}"
-            # Notice the CAST to NUMERIC here to keep BigQuery happy from the previous error
-            placeholders.append(f"(@oid, @name{suffix}, @size{suffix}, @qty{suffix}, CAST(@price{suffix} AS NUMERIC))")
+            # Added @iid{suffix} to the placeholders
+            placeholders.append(f"(@iid{suffix}, @oid, @name{suffix}, @size{suffix}, @qty{suffix}, CAST(@price{suffix} AS NUMERIC))")
             
-            # Add the specific values for THIS item to the params list
+            # Generate a unique ID for this specific line item
+            specific_line_item_id = str(uuid.uuid4())
+            
             item_params.extend([
+                bigquery.ScalarQueryParameter(f"iid{suffix}", "STRING", specific_line_item_id),
                 bigquery.ScalarQueryParameter(f"name{suffix}", "STRING", item['item_name']),
                 bigquery.ScalarQueryParameter(f"size{suffix}", "STRING", item['size']),
                 bigquery.ScalarQueryParameter(f"qty{suffix}", "INTEGER", item['quantity']),
@@ -555,14 +558,15 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
 
         # Execute the items insert
         bq.query(items_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=item_params)).result()
+        
         return {
             "status": "success",
             "order_id": new_order_id,
             "summary": {
-                "subtotal": items_subtotal,
-                "discount": discount,
-                "tax": sales_tax,
-                "total": order_total
+                "subtotal": round(items_subtotal, 2),
+                "discount": round(discount, 2),
+                "tax": round(sales_tax, 2),
+                "total": round(order_total, 2)
             }
         }
 
