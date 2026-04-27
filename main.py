@@ -481,17 +481,14 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
         order_items_to_insert = []
         
         for requested_item in data.items:
-            # Check if the ID exists in our lookup results
             details = menu_map.get(requested_item.item_id)
             
             if not details:
-                # THIS IS THE FIX: Stop the code if the ID is missing
                 raise HTTPException(
                     status_code=404, 
-                    detail=f"Item ID {requested_item.item_id} was not found in the menu table. Check your FULL_PATH or Project ID."
+                    detail=f"Item ID {requested_item.item_id} was not found in the menu table."
                 )
             
-            # If found, do the math
             price_val = details['price']
             line_total = price_val * requested_item.quantity
             items_subtotal += line_total
@@ -505,7 +502,6 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
             })
 
         # 2. Percentage Discount Logic
-        # Input 10.0 becomes 10%
         input_percent = float(data.discount_amount) if data.discount_amount else 0.0
         discount_dollars = round(items_subtotal * (input_percent / 100), 2)
         
@@ -530,15 +526,14 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
             bigquery.ScalarQueryParameter("sid", "STRING", data.store_id),
             bigquery.ScalarQueryParameter("odate", "STRING", order_timestamp),
             bigquery.ScalarQueryParameter("i_sub", "FLOAT", items_subtotal),
-            bigquery.ScalarQueryParameter("disc", "FLOAT", discount_dollars), # Fixed variable name
+            bigquery.ScalarQueryParameter("disc", "FLOAT", discount_dollars),
             bigquery.ScalarQueryParameter("o_sub", "FLOAT", order_subtotal),
             bigquery.ScalarQueryParameter("tax", "FLOAT", sales_tax),
             bigquery.ScalarQueryParameter("total", "FLOAT", order_total),
         ]
         bq.query(order_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=order_params)).result()
 
-        # --- 4. Update ORDER_ITEMS table (Mapping the ID) ---
-        # Added 'menu_item_id' to the column list below
+        # 4. Update ORDER_ITEMS table
         items_insert_query = f"""
             INSERT INTO `{FULL_PATH}.order_items` 
             (id, order_id, menu_item_id, item_name, size, quantity, price) 
@@ -549,12 +544,11 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
         
         for i, item in enumerate(order_items_to_insert):
             suffix = f"_{i}"
-            # Added @mid{suffix} to the placeholders
             placeholders.append(f"(@iid{suffix}, @oid, @mid{suffix}, @name{suffix}, @size{suffix}, @qty{suffix}, CAST(@price{suffix} AS NUMERIC))")
             
             item_params.extend([
                 bigquery.ScalarQueryParameter(f"iid{suffix}", "STRING", str(uuid.uuid4())),
-                bigquery.ScalarQueryParameter(f"mid{suffix}", "STRING", item['menu_item_id']), # Now saving the Menu Item ID!
+                bigquery.ScalarQueryParameter(f"mid{suffix}", "STRING", item['menu_item_id']),
                 bigquery.ScalarQueryParameter(f"name{suffix}", "STRING", item['item_name']),
                 bigquery.ScalarQueryParameter(f"size{suffix}", "STRING", item['size']),
                 bigquery.ScalarQueryParameter(f"qty{suffix}", "INTEGER", item['quantity']),
@@ -564,16 +558,31 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
         items_insert_query += ", ".join(placeholders)
         bq.query(items_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=item_params)).result()
 
-        # 5. Success Response
+        # 5. NEW: Update LOYALTY POINTS ($1 spent = 1 point, rounded down)
+        points_earned = int(math.floor(order_subtotal))
+        
+        update_points_query = f"""
+            UPDATE `{FULL_PATH}.members`
+            SET loyalty_points = COALESCE(loyalty_points, 0) + @points
+            WHERE id = @mid
+        """
+        points_params = [
+            bigquery.ScalarQueryParameter("points", "INTEGER", points_earned),
+            bigquery.ScalarQueryParameter("mid", "STRING", data.member_id)
+        ]
+        bq.query(update_points_query, job_config=bigquery.QueryJobConfig(query_parameters=points_params)).result()
+
+        # 6. Success Response
         return {
             "status": "success",
             "order_id": new_order_id,
             "summary": {
                 "items_subtotal": round(items_subtotal, 2),
                 "discount_percentage": f"{input_percent}%",
-                "discount_saved": round(discount_dollars, 2), # Fixed variable name
+                "discount_saved": round(discount_dollars, 2),
                 "tax": round(sales_tax, 2),
-                "total": round(order_total, 2)
+                "total": round(order_total, 2),
+                "loyalty_points_earned": points_earned
             }
         }
 
