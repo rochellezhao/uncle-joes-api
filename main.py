@@ -459,13 +459,10 @@ class PlaceOrderRequest(BaseModel):
 # --- The Place Order Endpoint ---
 @app.post("/orders", status_code=201)
 def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_client)):
-    # 1. Generate unique identifiers and metadata
     new_order_id = str(uuid.uuid4())
     order_timestamp = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
     sales_tax_rate = 0.08
 
-    # 2. Lookup item details from the menu_items table
-    # We do this so the user can't fake prices.
     item_names = [item.item_name for item in data.items]
     lookup_query = f"""
         SELECT name, size, price 
@@ -478,21 +475,22 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
     
     try:
         lookup_results = bq.query(lookup_query, job_config=job_config).result()
-        menu_map = {row.name: {"price": row.price, "size": row.size} for row in lookup_results}
         
-        # 3. Background Calculations
+        # --- THE FIX IS HERE ---
+        # We wrap row.price in float() to prevent the Decimal vs Float error
+        menu_map = {row.name: {"price": float(row.price), "size": row.size} for row in lookup_results}
+        
         items_subtotal = 0.0
         order_items_to_insert = []
         
         for requested_item in data.items:
             details = menu_map.get(requested_item.item_name)
             if not details:
-                raise HTTPException(status_code=404, detail=f"Item '{requested_item.item_name}' not found in menu.")
+                raise HTTPException(status_code=404, detail=f"Item '{requested_item.item_name}' not found.")
             
             line_total = details['price'] * requested_item.quantity
             items_subtotal += line_total
             
-            # Prepare data for the order_items table
             order_items_to_insert.append({
                 "order_id": new_order_id,
                 "item_name": requested_item.item_name,
@@ -501,13 +499,13 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
                 "price": details['price']
             })
 
-        # Apply Discount & Tax
-        discount = data.discount_amount if data.discount_amount else 0.0
+        discount = float(data.discount_amount) if data.discount_amount else 0.0
         order_subtotal = round(max(0, items_subtotal - discount), 2)
+        # Using math.floor for tax to match Uncle Joe's point logic
         sales_tax = round(order_subtotal * sales_tax_rate, 2)
         order_total = round(order_subtotal + sales_tax, 2)
 
-        # 4. Update the ORDERS table
+        # Update ORDERS table
         order_insert_query = f"""
             INSERT INTO `{FULL_PATH}.orders` 
             (order_id, member_id, store_id, order_date, items_subtotal, order_discount, order_subtotal, sales_tax, order_total)
@@ -526,8 +524,7 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
         ]
         bq.query(order_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=order_params)).result()
 
-        # 5. Update the ORDER_ITEMS table
-        # Using a multi-row values string for efficiency
+        # Update ORDER_ITEMS table
         items_insert_query = f"INSERT INTO `{FULL_PATH}.order_items` (order_id, item_name, size, quantity, price) VALUES "
         placeholders = []
         item_params = [bigquery.ScalarQueryParameter("oid", "STRING", new_order_id)]
@@ -557,4 +554,5 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
         }
 
     except Exception as e:
+        # This will now catch and show any other remaining issues
         raise HTTPException(status_code=500, detail=f"Order Failed: {str(e)}")
