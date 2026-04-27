@@ -406,16 +406,18 @@ def get_order_details(order_id: str, bq: bigquery.Client = Depends(get_bq_client
 @app.get("/members/{member_id}/points")
 def get_member_points(member_id: str, bq: bigquery.Client = Depends(get_bq_client)):
     """
-    Calculates total loyalty points for a member.
-    Formula: SUM(FLOOR(order_total)) - 1 point per whole dollar spent.
+    Returns the member's current loyalty balance from the members table
+    and their total order count from the orders table.
     """
-    # We use FLOOR to drop the cents before summing, as per your teammate's logic
+    # We join members and orders to get the current balance and the order count in one go
     query = f"""
         SELECT 
-            IFNULL(SUM(FLOOR(order_total)), 0) as total_points,
-            COUNT(order_id) as total_orders
-        FROM `{FULL_PATH}.orders`
-        WHERE member_id = @mid
+            m.loyalty_points,
+            COUNT(o.order_id) as total_orders
+        FROM `{FULL_PATH}.members` AS m
+        LEFT JOIN `{FULL_PATH}.orders` AS o ON m.id = o.member_id
+        WHERE m.id = @mid
+        GROUP BY m.loyalty_points
     """
     
     job_config = bigquery.QueryJobConfig(
@@ -426,16 +428,16 @@ def get_member_points(member_id: str, bq: bigquery.Client = Depends(get_bq_clien
     
     try:
         query_job = bq.query(query, job_config=job_config)
-        results = [dict(row) for row in query_job]
+        result = next(query_job.result(), None)
         
-        # Grab the data (or default to 0 if nothing is found)
-        data = results[0] if results else {"total_points": 0, "total_orders": 0}
+        if not result:
+            raise HTTPException(status_code=404, detail="Member not found.")
         
         return {
             "member_id": member_id,
             "points_summary": {
-                "current_balance": int(data['total_points']),
-                "lifetime_orders": data['total_orders'],
+                "current_balance": int(result.loyalty_points) if result.loyalty_points else 0,
+                "lifetime_orders": result.total_orders,
                 "program_name": "Uncle Joe's Coffee Club"
             }
         }
@@ -443,7 +445,7 @@ def get_member_points(member_id: str, bq: bigquery.Client = Depends(get_bq_clien
     except Exception as e:
         raise HTTPException(
             status_code=500, 
-            detail=f"Points Calculation Error: {str(e)}"
+            detail=f"Points Retrieval Error: {str(e)}"
         )
 
 # submitting orders
