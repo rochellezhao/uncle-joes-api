@@ -280,18 +280,24 @@ def get_order_history(
 ):
     """
     Fetches the full order history for a member.
-    Joins with Locations table to get the store's city/state.
+    Joins with Locations for store info and Order_Items for item details.
     """
+    # We use ARRAY_AGG(STRUCT(...)) to nest the items inside each order row
     query = f"""
         SELECT 
             o.order_id, 
             o.order_date, 
             o.order_total, 
             l.city, 
-            l.state
+            l.state,
+            ARRAY_AGG(
+                STRUCT(i.item_name, i.size, i.quantity, i.price)
+            ) AS items
         FROM `{FULL_PATH}.orders` AS o
         LEFT JOIN `{FULL_PATH}.locations` AS l ON o.store_id = l.id
+        LEFT JOIN `{FULL_PATH}.order_items` AS i ON o.order_id = i.order_id
         WHERE o.member_id = @mid
+        GROUP BY o.order_id, o.order_date, o.order_total, l.city, l.state
         ORDER BY o.order_date DESC
     """
     
@@ -301,7 +307,6 @@ def get_order_history(
         query += " LIMIT @limit"
         params.append(bigquery.ScalarQueryParameter("limit", "INTEGER", limit))
     else:
-        # Safety ceiling for the pilot
         query += " LIMIT 1000"
         params.append(bigquery.ScalarQueryParameter("limit", "INTEGER", 1000))
 
@@ -311,10 +316,15 @@ def get_order_history(
         query_job = bq.query(query, job_config=job_config)
         results = [dict(row) for row in query_job]
         
-        # 3. Format the date to look clean in JSON
         for row in results:
+            # Format the date for the frontend
             if row.get('order_date'):
                 row['order_date'] = row['order_date'].strftime('%Y-%m-%d %H:%M')
+            
+            # Clean up the nested items list
+            # BigQuery sometimes returns a list of one null struct if no items exist
+            if row['items'] == [None] or (len(row['items']) > 0 and row['items'][0].get('item_name') is None):
+                row['items'] = []
 
         return {
             "member_id": member_id,
@@ -323,7 +333,6 @@ def get_order_history(
         }
 
     except Exception as e:
-        # This will tell us if there's a specific BigQuery table error
         raise HTTPException(
             status_code=500, 
             detail=f"BigQuery Order History Error: {str(e)}"
