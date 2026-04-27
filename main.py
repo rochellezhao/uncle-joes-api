@@ -496,9 +496,17 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
                 "price": details['price']
             })
 
-        # 2. Background Calculations
-        discount = float(data.discount_amount) if data.discount_amount else 0.0
-        order_subtotal = round(max(0, items_subtotal - discount), 2)
+        # 2. Background Calculations (Percentage Logic)
+        # We treat discount_amount as a whole number percentage (e.g., 10.0 = 10%)
+        discount_percent = float(data.discount_amount) if data.discount_amount else 0.0
+        
+        # Calculate the actual dollar value of that percentage
+        discount_dollars = round(items_subtotal * (discount_percent / 100), 2)
+        
+        # New Subtotal after percentage is taken off
+        order_subtotal = round(max(0, items_subtotal - discount_dollars), 2)
+        
+        # Calculate 8% Sales Tax on the discounted subtotal
         sales_tax = round(order_subtotal * sales_tax_rate, 2)
         order_total = round(order_subtotal + sales_tax, 2)
 
