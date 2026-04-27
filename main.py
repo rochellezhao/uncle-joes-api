@@ -445,18 +445,19 @@ def get_member_points(member_id: str, bq: bigquery.Client = Depends(get_bq_clien
 # submitting orders
 # --- Pydantic Models for Input Validation ---
 
+# 1. Update the Input Model
 class OrderItemInput(BaseModel):
-    # This is all the customer needs to submit
     item_id: str
+    item_name: str
+    size: str
     quantity: int
+    price: float
 
+# 2. Update the PlaceOrderSubmission Model
 class PlaceOrderSubmission(BaseModel):
-    # The minimum required for a successful order
     member_id: str
     store_id: str
     items: List[OrderItemInput]
-    
-    # Optional field: can be 0 or empty in JSON
     discount_amount: Optional[float] = 0.0
 
 # --- THE POST /ORDERS ENDPOINT ---
