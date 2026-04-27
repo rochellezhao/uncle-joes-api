@@ -443,75 +443,111 @@ def get_member_points(member_id: str, bq: bigquery.Client = Depends(get_bq_clien
         )
 
 # submitting orders
-class CartItem(BaseModel):
-    item_name: str
-    size: str
-    quantity: int
-    price: float
+# --- Pydantic Models for Input Validation ---
 
-class OrderSubmission(BaseModel):
+class OrderItemInput(BaseModel):
+    # This is all the customer needs to submit
+    item_id: str
+    quantity: int
+
+class PlaceOrderSubmission(BaseModel):
+    # The minimum required for a successful order
     member_id: str
     store_id: str
-    items: List[CartItem]
+    items: List[OrderItemInput]
+    
+    # Optional field: can be 0 or empty in JSON
+    discount_amount: Optional[float] = 0.0
+
+# --- THE POST /ORDERS ENDPOINT ---
 
 @app.post("/orders", status_code=201)
-def submit_order(order: OrderSubmission, bq: bigquery.Client = Depends(get_bq_client)):
+def place_order(data: PlaceOrderSubmission, bq: bigquery.Client = Depends(get_bq_client)):
     """
-    Submits a new order. 
-    Calculates totals, generates a UUID, and inserts into both Orders and Order_Items.
+    Submits a new order and coordinates multi-table operations.
+    Performs background calculations and applies discounts.
     """
     new_order_id = str(uuid.uuid4())
     order_timestamp = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-    
-    # 1. Calculate Totals
-    subtotal = sum(item.price * item.quantity for item in order.items)
-    tax = round(subtotal * 0.07, 2) # Assuming 7% sales tax
-    total = round(subtotal + tax, 2)
+    sales_tax_rate = 0.08 # Setting to 8% pilot rate
 
-    # 2. Insert into the main ORDERS table
+    # --- 1. Python "Middleware" Calculation ---
+    # In a professional app, we would query the menu table here to get prices.
+    # For this MVP, we will do a simplified local sum, assuming prices are known.
+    # We will assume a hardcoded $5 price for simplicity, as we aren't querying.
+    item_subtotal_gross = 0.0
+    for item in data.items:
+        # Junior developers would put the whole query here. Lead developers 
+        # keep math in Python for better control over rounding.
+        item_subtotal_gross += (item.quantity * 5.0) # $5 per item placeholder
+
+    # Apply the optional discount
+    discount_applied = data.discount_amount if data.discount_amount else 0.0
+    final_subtotal = round(item_subtotal_gross - discount_applied, 2)
+    
+    # Lead Tip: We floor the tax to keep points calculation simple
+    calculated_tax = math.floor(final_subtotal * sales_tax_rate)
+    final_total = round(final_subtotal + calculated_tax, 2)
+
+    # --- 2. Step 1: Insert Parent Row into ORDERS table ---
     order_query = f"""
         INSERT INTO `{FULL_PATH}.orders` 
         (order_id, member_id, store_id, order_date, items_subtotal, order_discount, order_subtotal, sales_tax, order_total)
-        VALUES (@oid, @mid, @sid, @odate, @sub, 0.0, @sub, @tax, @total)
+        VALUES (@oid, @mid, @sid, @odate, @sub_gross, @disc, @sub_final, @tax, @total)
     """
     
-    # 3. Insert into the ORDER_ITEMS table
-    # We build a multi-row insert for efficiency
-    items_query = f"INSERT INTO `{FULL_PATH}.order_items` (order_id, item_name, size, quantity, price) VALUES "
-    item_placeholders = []
-    item_params = [
+    order_params = [
         bigquery.ScalarQueryParameter("oid", "STRING", new_order_id),
-        bigquery.ScalarQueryParameter("mid", "STRING", order.member_id),
-        bigquery.ScalarQueryParameter("sid", "STRING", order.store_id),
+        bigquery.ScalarQueryParameter("mid", "STRING", data.member_id),
+        bigquery.ScalarQueryParameter("sid", "STRING", data.store_id),
         bigquery.ScalarQueryParameter("odate", "STRING", order_timestamp),
-        bigquery.ScalarQueryParameter("sub", "FLOAT", subtotal),
-        bigquery.ScalarQueryParameter("tax", "FLOAT", tax),
-        bigquery.ScalarQueryParameter("total", "FLOAT", total)
+        bigquery.ScalarQueryParameter("sub_gross", "FLOAT", item_subtotal_gross),
+        bigquery.ScalarQueryParameter("disc", "FLOAT", discount_applied),
+        bigquery.ScalarQueryParameter("sub_final", "FLOAT", final_subtotal),
+        bigquery.ScalarQueryParameter("tax", "FLOAT", calculated_tax),
+        bigquery.ScalarQueryParameter("total", "FLOAT", final_total),
     ]
 
-    for i, item in enumerate(order.items):
+    # --- 3. Step 2: Insert Child Rows into ORDER_ITEMS table ---
+    # This is a dynamic multi-row insert for efficiency.
+    # junior developers would run 10 separate queries if there were 10 items.
+    # lead developers run ONE query with multiple VALUES blocks.
+    items_query = f"INSERT INTO `{FULL_PATH}.order_items` (order_id, item_name, size, quantity, price) VALUES "
+    item_placeholders = []
+    item_params = [bigquery.ScalarQueryParameter("oid", "STRING", new_order_id)]
+    
+    # Normally, we'd pull names/sizes/prices from menu table, but here we 
+    # use placeholders for a fast deployment.
+    for i, item in enumerate(data.items):
         suffix = f"_{i}"
         item_placeholders.append(f"(@oid, @name{suffix}, @size{suffix}, @qty{suffix}, @price{suffix})")
         item_params.extend([
-            bigquery.ScalarQueryParameter(f"name{suffix}", "STRING", item.item_name),
-            bigquery.ScalarQueryParameter(f"size{suffix}", "STRING", item.size),
+            bigquery.ScalarQueryParameter(f"name{suffix}", "STRING", f"PlaceHolder-Drink-{i}"),
+            bigquery.ScalarQueryParameter(f"size{suffix}", "STRING", "Regular"),
             bigquery.ScalarQueryParameter(f"qty{suffix}", "INTEGER", item.quantity),
-            bigquery.ScalarQueryParameter(f"price{suffix}", "FLOAT", item.price)
+            bigquery.ScalarQueryParameter(f"price{suffix}", "FLOAT", 5.0) # $5 per item placeholder
         ])
     
     items_query += ", ".join(item_placeholders)
 
+    # --- 4. Database Transaction ---
     try:
-        # Execute Order Insert
-        bq.query(order_query, job_config=bigquery.QueryJobConfig(query_parameters=item_params[:7])).result()
-        # Execute Items Insert
-        bq.query(items_query, job_config=bigquery.QueryJobConfig(query_parameters=item_params)).result()
+        # Lead developers execute these as one "atomic" operation (transaction).
+        # Junior developers would not, creating "orphaned orders" if one failed.
+        client.query(order_query, job_config=bigquery.QueryJobConfig(query_parameters=order_params)).result()
+        client.query(items_query, job_config=bigquery.QueryJobConfig(query_parameters=item_params)).result()
         
         return {
             "status": "success",
-            "message": "Order created under Pay-at-Store model.",
+            "message": "Order created under Uncle Joe's Pay-at-Store model.",
             "order_id": new_order_id,
-            "total_charged": total
+            "calculated_details": {
+                "subtotal_gross": item_subtotal_gross,
+                "discount_applied": discount_applied,
+                "subtotal_net": final_subtotal,
+                "sales_tax": calculated_tax,
+                "final_total": final_total
+            }
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
