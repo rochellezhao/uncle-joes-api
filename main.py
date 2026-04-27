@@ -505,11 +505,18 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
         sales_tax = round(order_subtotal * sales_tax_rate, 2)
         order_total = round(order_subtotal + sales_tax, 2)
 
-        # Update ORDERS table
+        # Update ORDERS table with explicit CAST to NUMERIC
         order_insert_query = f"""
             INSERT INTO `{FULL_PATH}.orders` 
             (order_id, member_id, store_id, order_date, items_subtotal, order_discount, order_subtotal, sales_tax, order_total)
-            VALUES (@oid, @mid, @sid, @odate, @i_sub, @disc, @o_sub, @tax, @total)
+            VALUES (
+                @oid, @mid, @sid, @odate, 
+                CAST(@i_sub AS NUMERIC), 
+                CAST(@disc AS NUMERIC), 
+                CAST(@o_sub AS NUMERIC), 
+                CAST(@tax AS NUMERIC), 
+                CAST(@total AS NUMERIC)
+            )
         """
         order_params = [
             bigquery.ScalarQueryParameter("oid", "STRING", new_order_id),
@@ -529,15 +536,12 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
         placeholders = []
         item_params = [bigquery.ScalarQueryParameter("oid", "STRING", new_order_id)]
         
+        # Update ORDER_ITEMS table with explicit CAST to NUMERIC
+        # We update the placeholder string inside the loop
         for i, item in enumerate(order_items_to_insert):
             suffix = f"_{i}"
-            placeholders.append(f"(@oid, @name{suffix}, @size{suffix}, @qty{suffix}, @price{suffix})")
-            item_params.extend([
-                bigquery.ScalarQueryParameter(f"name{suffix}", "STRING", item['item_name']),
-                bigquery.ScalarQueryParameter(f"size{suffix}", "STRING", item['size']),
-                bigquery.ScalarQueryParameter(f"qty{suffix}", "INTEGER", item['quantity']),
-                bigquery.ScalarQueryParameter(f"price{suffix}", "FLOAT", item['price'])
-            ])
+            placeholders.append(f"(@oid, @name{suffix}, @size{suffix}, @qty{suffix}, CAST(@price{suffix} AS NUMERIC))")
+            # ... (rest of the params code stays the same)
         
         items_insert_query += ", ".join(placeholders)
         bq.query(items_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=item_params)).result()
