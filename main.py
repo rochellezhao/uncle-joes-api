@@ -442,3 +442,76 @@ def get_member_points(member_id: str, bq: bigquery.Client = Depends(get_bq_clien
             detail=f"Points Calculation Error: {str(e)}"
         )
 
+# submitting orders
+class CartItem(BaseModel):
+    item_name: str
+    size: str
+    quantity: int
+    price: float
+
+class OrderSubmission(BaseModel):
+    member_id: str
+    store_id: str
+    items: List[CartItem]
+
+@app.post("/orders", status_code=201)
+def submit_order(order: OrderSubmission, bq: bigquery.Client = Depends(get_bq_client)):
+    """
+    Submits a new order. 
+    Calculates totals, generates a UUID, and inserts into both Orders and Order_Items.
+    """
+    new_order_id = str(uuid.uuid4())
+    order_timestamp = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+    
+    # 1. Calculate Totals
+    subtotal = sum(item.price * item.quantity for item in order.items)
+    tax = round(subtotal * 0.07, 2) # Assuming 7% sales tax
+    total = round(subtotal + tax, 2)
+
+    # 2. Insert into the main ORDERS table
+    order_query = f"""
+        INSERT INTO `{FULL_PATH}.orders` 
+        (order_id, member_id, store_id, order_date, items_subtotal, order_discount, order_subtotal, sales_tax, order_total)
+        VALUES (@oid, @mid, @sid, @odate, @sub, 0.0, @sub, @tax, @total)
+    """
+    
+    # 3. Insert into the ORDER_ITEMS table
+    # We build a multi-row insert for efficiency
+    items_query = f"INSERT INTO `{FULL_PATH}.order_items` (order_id, item_name, size, quantity, price) VALUES "
+    item_placeholders = []
+    item_params = [
+        bigquery.ScalarQueryParameter("oid", "STRING", new_order_id),
+        bigquery.ScalarQueryParameter("mid", "STRING", order.member_id),
+        bigquery.ScalarQueryParameter("sid", "STRING", order.store_id),
+        bigquery.ScalarQueryParameter("odate", "STRING", order_timestamp),
+        bigquery.ScalarQueryParameter("sub", "FLOAT", subtotal),
+        bigquery.ScalarQueryParameter("tax", "FLOAT", tax),
+        bigquery.ScalarQueryParameter("total", "FLOAT", total)
+    ]
+
+    for i, item in enumerate(order.items):
+        suffix = f"_{i}"
+        item_placeholders.append(f"(@oid, @name{suffix}, @size{suffix}, @qty{suffix}, @price{suffix})")
+        item_params.extend([
+            bigquery.ScalarQueryParameter(f"name{suffix}", "STRING", item.item_name),
+            bigquery.ScalarQueryParameter(f"size{suffix}", "STRING", item.size),
+            bigquery.ScalarQueryParameter(f"qty{suffix}", "INTEGER", item.quantity),
+            bigquery.ScalarQueryParameter(f"price{suffix}", "FLOAT", item.price)
+        ])
+    
+    items_query += ", ".join(item_placeholders)
+
+    try:
+        # Execute Order Insert
+        bq.query(order_query, job_config=bigquery.QueryJobConfig(query_parameters=item_params[:7])).result()
+        # Execute Items Insert
+        bq.query(items_query, job_config=bigquery.QueryJobConfig(query_parameters=item_params)).result()
+        
+        return {
+            "status": "success",
+            "message": "Order created under Pay-at-Store model.",
+            "order_id": new_order_id,
+            "total_charged": total
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database Error: {str(e)}")
