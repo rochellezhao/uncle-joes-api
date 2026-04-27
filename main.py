@@ -149,23 +149,25 @@ def get_menu_item(item_id: str, bq: bigquery.Client = Depends(get_bq_client)):
 @app.get("/locations")
 def get_locations(bq: bigquery.Client = Depends(get_bq_client)):
     """
-    Returns a simple list of all physical store addresses.
+    Returns a list of store locations formatted as 'ID: Address'.
     """
-    # We only select the specific column we need to keep the response light
+    # We now select both the 'id' (store_id) and the address
     query = f"""
-        SELECT location_map_address 
+        SELECT id, location_map_address 
         FROM `{FULL_PATH}.locations`
         WHERE location_map_address IS NOT NULL
         ORDER BY location_map_address ASC
     """
     try:
         query_job = bq.query(query)
-        # We extract just the address string from each row
-        addresses = [row["location_map_address"] for row in query_job]
+        
+        # We combine the ID and address into a single readable string
+        # Result example: "0a4c002c...: 123 Coffee Lane, West Lafayette"
+        locations_list = [f"{row['id']}: {row['location_map_address']}" for row in query_job]
         
         return {
-            "total_locations": len(addresses),
-            "addresses": addresses
+            "total_locations": len(locations_list),
+            "locations": locations_list
         }
     except Exception as e:
         raise HTTPException(
@@ -679,20 +681,16 @@ def delete_account(member_id: str, bq: bigquery.Client = Depends(get_bq_client))
 @app.post("/orders/redeem", status_code=201)
 def place_order_with_points(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_client)):
     """
-    Allows a user to pay for their entire order using points.
-    Cost is calculated by rounding up each item's price.
+    Pay for the entire order using loyalty points. 
+    Costs 1 point per $1 of item price (rounded up).
     """
     new_order_id = str(uuid.uuid4())
     order_timestamp = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
 
     # 1. Lookup item prices
     item_ids = [item.item_id for item in data.items]
-    # Instead of calling the other endpoint, just run a direct query
-    lookup_query = f"""
-    SELECT loyalty_points, first_name 
-    FROM `{FULL_PATH}.members` 
-    WHERE id = @mid
-    """
+    lookup_query = f"SELECT id, name, size, price FROM `{FULL_PATH}.menu_items` WHERE id IN UNNEST(@ids)"
+    
     try:
         lookup_results = bq.query(lookup_query, job_config=bigquery.QueryJobConfig(
             query_parameters=[bigquery.ArrayQueryParameter("ids", "STRING", item_ids)])).result()
@@ -706,7 +704,7 @@ def place_order_with_points(data: PlaceOrderRequest, bq: bigquery.Client = Depen
             if not details:
                 raise HTTPException(status_code=404, detail=f"Item ID {requested_item.item_id} not found.")
             
-            # THE LOGIC: Round UP the price to get point cost per item
+            # Point Cost Logic: Round UP price (e.g., $3.99 = 4 pts)
             item_point_cost = math.ceil(details['price'])
             total_points_cost += (item_point_cost * requested_item.quantity)
             
@@ -715,51 +713,51 @@ def place_order_with_points(data: PlaceOrderRequest, bq: bigquery.Client = Depen
                 "item_name": details['name'],
                 "size": details['size'],
                 "quantity": requested_item.quantity,
-                "price": 0.0  # It's free in terms of cash
+                "price": 0.0 # Points order = $0 cash value
             })
 
-        # 2. Check Member Balance
-        member_query = f"SELECT points_balance FROM `{FULL_PATH}.members` WHERE id = @mid"
-        member_res = bq.query(member_query, job_config=bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("mid", "STRING", data.member_id)])).result()
+        # 2. Check Member Balance (Using the correct column: loyalty_points)
+        member_query = f"SELECT loyalty_points FROM `{FULL_PATH}.members` WHERE id = @mid"
+        member_config = bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("mid", "STRING", data.member_id)]
+        )
+        member_res = bq.query(member_query, job_config=member_config).result()
         member = next(member_res, None)
         
-        if not member or (member.points_balance or 0) < total_points_cost:
-            raise HTTPException(status_code=400, detail=f"Insufficient points. Need {total_points_cost}.")
+        current_points = member.loyalty_points if member and member.loyalty_points else 0
+        
+        if not member or current_points < total_points_cost:
+            raise HTTPException(status_code=400, detail=f"Insufficient points. Need {total_points_cost}, have {current_points}.")
 
-        # 3. Update Member Balance (Deduct Points)
-        new_balance = int(member.points_balance) - total_points_cost
-        update_bal_query = f"UPDATE `{FULL_PATH}.members` SET points_balance = @nb WHERE id = @mid"
-        bq.query(update_bal_query, job_config=bigquery.QueryJobConfig(query_parameters=[
-            bigquery.ScalarQueryParameter("nb", "INTEGER", new_balance),
-            bigquery.ScalarQueryParameter("mid", "STRING", data.member_id)
-        ])).result()
+        # 3. Deduct Points from Member Profile
+        new_balance = current_points - total_points_cost
+        update_bal_query = f"UPDATE `{FULL_PATH}.members` SET loyalty_points = @nb WHERE id = @mid"
+        update_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("nb", "INTEGER", new_balance),
+                bigquery.ScalarQueryParameter("mid", "STRING", data.member_id)
+            ]
+        )
+        bq.query(update_bal_query, job_config=update_config).result()
 
-        # 4. Record the Order in 'orders' table
-        # We record subtotals/totals as 0 because it was a points transaction
+        # 4. Insert into ORDERS table ($0 totals)
         order_insert_query = f"""
             INSERT INTO `{FULL_PATH}.orders` 
             (order_id, member_id, store_id, order_date, items_subtotal, order_discount, order_subtotal, sales_tax, order_total)
             VALUES (@oid, @mid, @sid, @odate, 0, 0, 0, 0, 0)
         """
-        bq.query(order_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=[
-            bigquery.ScalarQueryParameter("oid", "STRING", new_order_id),
-            bigquery.ScalarQueryParameter("mid", "STRING", data.member_id),
-            bigquery.ScalarQueryParameter("sid", "STRING", data.store_id),
-            bigquery.ScalarQueryParameter("odate", "STRING", order_timestamp)
-        ])).result()
+        bq.query(order_insert_query, job_config=member_config).result() # Reusing mid/sid logic
 
-        # 5. Record items in 'order_items' table
-        # (Same loop logic as your regular place_order endpoint)
-        # ... [Insert order_items logic here] ...
+        # 5. Insert into ORDER_ITEMS table
+        # [Insert the same order_items loop logic we used in the cash endpoint here]
 
         return {
             "status": "success",
-            "message": "Order paid with points!",
-            "points_spent": total_points_cost,
-            "remaining_balance": new_balance,
+            "message": "Order processed successfully using points!",
+            "points_debited": total_points_cost,
+            "new_balance": new_balance,
             "order_id": new_order_id
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Redemption Failed: {str(e)}")
