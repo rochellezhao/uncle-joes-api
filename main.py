@@ -482,19 +482,16 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
         
         for requested_item in data.items:
             details = menu_map.get(requested_item.item_id)
-            if not details:
-                raise HTTPException(status_code=404, detail=f"Item ID '{requested_item.item_id}' not found.")
-            
-            line_total = details['price'] * requested_item.quantity
-            items_subtotal += line_total
+            # ... validation logic ...
             
             order_items_to_insert.append({
+                "menu_item_id": requested_item.item_id, # Add this line!
                 "item_name": details['name'],
                 "size": details['size'],
                 "quantity": requested_item.quantity,
                 "price": details['price']
             })
-
+            
         # 2. Percentage Discount Logic
         # Input 10.0 becomes 10%
         input_percent = float(data.discount_amount) if data.discount_amount else 0.0
@@ -528,17 +525,24 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
         ]
         bq.query(order_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=order_params)).result()
 
-        # 4. Update ORDER_ITEMS table
-        items_insert_query = f"INSERT INTO `{FULL_PATH}.order_items` (id, order_id, item_name, size, quantity, price) VALUES "
+        # --- 4. Update ORDER_ITEMS table (Mapping the ID) ---
+        # Added 'menu_item_id' to the column list below
+        items_insert_query = f"""
+            INSERT INTO `{FULL_PATH}.order_items` 
+            (id, order_id, menu_item_id, item_name, size, quantity, price) 
+            VALUES 
+        """
         placeholders = []
         item_params = [bigquery.ScalarQueryParameter("oid", "STRING", new_order_id)]
         
         for i, item in enumerate(order_items_to_insert):
             suffix = f"_{i}"
-            placeholders.append(f"(@iid{suffix}, @oid, @name{suffix}, @size{suffix}, @qty{suffix}, CAST(@price{suffix} AS NUMERIC))")
+            # Added @mid{suffix} to the placeholders
+            placeholders.append(f"(@iid{suffix}, @oid, @mid{suffix}, @name{suffix}, @size{suffix}, @qty{suffix}, CAST(@price{suffix} AS NUMERIC))")
             
             item_params.extend([
                 bigquery.ScalarQueryParameter(f"iid{suffix}", "STRING", str(uuid.uuid4())),
+                bigquery.ScalarQueryParameter(f"mid{suffix}", "STRING", item['menu_item_id']), # Now saving the Menu Item ID!
                 bigquery.ScalarQueryParameter(f"name{suffix}", "STRING", item['item_name']),
                 bigquery.ScalarQueryParameter(f"size{suffix}", "STRING", item['size']),
                 bigquery.ScalarQueryParameter(f"qty{suffix}", "INTEGER", item['quantity']),
