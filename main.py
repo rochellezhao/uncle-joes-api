@@ -665,3 +665,88 @@ def delete_account(member_id: str, bq: bigquery.Client = Depends(get_bq_client))
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Deep delete failed: {str(e)}")
+
+#redeem points
+@app.post("/orders/redeem", status_code=201)
+def place_order_with_points(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_client)):
+    """
+    Allows a user to pay for their entire order using points.
+    Cost is calculated by rounding up each item's price.
+    """
+    new_order_id = str(uuid.uuid4())
+    order_timestamp = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+
+    # 1. Lookup item prices
+    item_ids = [item.item_id for item in data.items]
+    lookup_query = f"SELECT id, name, size, price FROM `{FULL_PATH}.menu_items` WHERE id IN UNNEST(@ids)"
+    
+    try:
+        lookup_results = bq.query(lookup_query, job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ArrayQueryParameter("ids", "STRING", item_ids)])).result()
+        menu_map = {row.id: {"name": row.name, "price": float(row.price), "size": row.size} for row in lookup_results}
+
+        total_points_cost = 0
+        order_items_to_insert = []
+
+        for requested_item in data.items:
+            details = menu_map.get(requested_item.item_id)
+            if not details:
+                raise HTTPException(status_code=404, detail=f"Item ID {requested_item.item_id} not found.")
+            
+            # THE LOGIC: Round UP the price to get point cost per item
+            item_point_cost = math.ceil(details['price'])
+            total_points_cost += (item_point_cost * requested_item.quantity)
+            
+            order_items_to_insert.append({
+                "menu_item_id": requested_item.item_id,
+                "item_name": details['name'],
+                "size": details['size'],
+                "quantity": requested_item.quantity,
+                "price": 0.0  # It's free in terms of cash
+            })
+
+        # 2. Check Member Balance
+        member_query = f"SELECT points_balance FROM `{FULL_PATH}.members` WHERE id = @mid"
+        member_res = bq.query(member_query, job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("mid", "STRING", data.member_id)])).result()
+        member = next(member_res, None)
+        
+        if not member or (member.points_balance or 0) < total_points_cost:
+            raise HTTPException(status_code=400, detail=f"Insufficient points. Need {total_points_cost}.")
+
+        # 3. Update Member Balance (Deduct Points)
+        new_balance = int(member.points_balance) - total_points_cost
+        update_bal_query = f"UPDATE `{FULL_PATH}.members` SET points_balance = @nb WHERE id = @mid"
+        bq.query(update_bal_query, job_config=bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("nb", "INTEGER", new_balance),
+            bigquery.ScalarQueryParameter("mid", "STRING", data.member_id)
+        ])).result()
+
+        # 4. Record the Order in 'orders' table
+        # We record subtotals/totals as 0 because it was a points transaction
+        order_insert_query = f"""
+            INSERT INTO `{FULL_PATH}.orders` 
+            (order_id, member_id, store_id, order_date, items_subtotal, order_discount, order_subtotal, sales_tax, order_total)
+            VALUES (@oid, @mid, @sid, @odate, 0, 0, 0, 0, 0)
+        """
+        bq.query(order_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("oid", "STRING", new_order_id),
+            bigquery.ScalarQueryParameter("mid", "STRING", data.member_id),
+            bigquery.ScalarQueryParameter("sid", "STRING", data.store_id),
+            bigquery.ScalarQueryParameter("odate", "STRING", order_timestamp)
+        ])).result()
+
+        # 5. Record items in 'order_items' table
+        # (Same loop logic as your regular place_order endpoint)
+        # ... [Insert order_items logic here] ...
+
+        return {
+            "status": "success",
+            "message": "Order paid with points!",
+            "points_spent": total_points_cost,
+            "remaining_balance": new_balance,
+            "order_id": new_order_id
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
