@@ -272,6 +272,7 @@ def get_member_profile(member_id: str, bq: bigquery.Client = Depends(get_bq_clie
     return results[0]
 
 # --- MEMBER: ORDER HISTORY ---
+# --- MEMBER: ORDER HISTORY WITH NESTED ITEMS ---
 @app.get("/members/{member_id}/orders")
 def get_order_history(
     member_id: str, 
@@ -279,30 +280,38 @@ def get_order_history(
     bq: bigquery.Client = Depends(get_bq_client)
 ):
     """
-    Fetches the full order history for a member.
-    Joins with Locations for store info and Order_Items for item details.
+    Fetches full order history for a member.
+    Calculates order_total dynamically from line items to ensure math accuracy.
     """
-    # We use ARRAY_AGG(STRUCT(...)) to nest the items inside each order row
+    # 1. We calculate 'order_total' on the fly by summing (price * quantity)
+    # 2. We use ARRAY_AGG(STRUCT(...)) to nest all items into a single order row
     query = f"""
         SELECT 
             o.order_id, 
             o.order_date, 
-            o.order_total, 
+            ROUND(SUM(i.price * i.quantity), 2) AS calculated_total, 
             l.city, 
             l.state,
             ARRAY_AGG(
-                STRUCT(i.item_name, i.size, i.quantity, i.price)
+                STRUCT(
+                    i.item_name, 
+                    i.size, 
+                    i.quantity, 
+                    i.price,
+                    ROUND(i.price * i.quantity, 2) AS item_subtotal
+                )
             ) AS items
         FROM `{FULL_PATH}.orders` AS o
         LEFT JOIN `{FULL_PATH}.locations` AS l ON o.store_id = l.id
         LEFT JOIN `{FULL_PATH}.order_items` AS i ON o.order_id = i.order_id
         WHERE o.member_id = @mid
-        GROUP BY o.order_id, o.order_date, o.order_total, l.city, l.state
+        GROUP BY o.order_id, o.order_date, l.city, l.state
         ORDER BY o.order_date DESC
     """
     
     params = [bigquery.ScalarQueryParameter("mid", "STRING", member_id)]
     
+    # Handle optional limit for the frontend
     if limit:
         query += " LIMIT @limit"
         params.append(bigquery.ScalarQueryParameter("limit", "INTEGER", limit))
@@ -317,12 +326,13 @@ def get_order_history(
         results = [dict(row) for row in query_job]
         
         for row in results:
-            # Format the date for the frontend
+            # Clean up Date Formatting
             if row.get('order_date'):
+                # Format to: YYYY-MM-DD HH:MM
                 row['order_date'] = row['order_date'].strftime('%Y-%m-%d %H:%M')
             
-            # Clean up the nested items list
-            # BigQuery sometimes returns a list of one null struct if no items exist
+            # Safety Check: If an order exists but has no items, BigQuery 
+            # returns a list with one 'None' entry. We clean that up here.
             if row['items'] == [None] or (len(row['items']) > 0 and row['items'][0].get('item_name') is None):
                 row['items'] = []
 
@@ -337,7 +347,6 @@ def get_order_history(
             status_code=500, 
             detail=f"BigQuery Order History Error: {str(e)}"
         )
-
 # --- MEMBER: UPDATE PROFILE ---
 @app.patch("/members/{member_id}")
 def update_member_profile(member_id: str, data: UpdateMemberRequest, bq: bigquery.Client = Depends(get_bq_client)):
