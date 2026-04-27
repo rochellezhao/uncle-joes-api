@@ -491,7 +491,7 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
                 "quantity": requested_item.quantity,
                 "price": details['price']
             })
-            
+
         # 2. Percentage Discount Logic
         # Input 10.0 becomes 10%
         input_percent = float(data.discount_amount) if data.discount_amount else 0.0
@@ -567,3 +567,89 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Order Failed: {str(e)}")
+
+# create new account/user
+class RegistrationRequest(BaseModel):
+    first_name: str
+    last_name: str
+    email: str
+    phone_number: str
+
+@app.post("/register", status_code=201)
+def register_member(user: RegistrationRequest, bq: bigquery.Client = Depends(get_bq_client)):
+    """
+    Registers a new Coffee Club member and returns their unique member_id.
+    """
+    new_member_id = str(uuid.uuid4())
+    
+    query = f"""
+        INSERT INTO `{FULL_PATH}.members` (id, first_name, last_name, email, phone_number)
+        VALUES (@mid, @fname, @lname, @email, @phone)
+    """
+    
+    params = [
+        bigquery.ScalarQueryParameter("mid", "STRING", new_member_id),
+        bigquery.ScalarQueryParameter("fname", "STRING", user.first_name),
+        bigquery.ScalarQueryParameter("lname", "STRING", user.last_name),
+        bigquery.ScalarQueryParameter("email", "STRING", user.email),
+        bigquery.ScalarQueryParameter("phone", "STRING", user.phone_number),
+    ]
+    
+    try:
+        bq.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        return {
+            "status": "success",
+            "message": f"Welcome to the Coffee Club, {user.first_name}!",
+            "member_id": new_member_id
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
+
+#delete account/user info and history
+@app.delete("/members/{member_id}")
+def delete_account(member_id: str, bq: bigquery.Client = Depends(get_bq_client)):
+    """
+    Permanently scrubs all member data, including order history and line items.
+    """
+    try:
+        # Step 1: Find all Order IDs belonging to this member
+        # We need these to know which items to delete in the order_items table
+        find_orders_query = f"SELECT order_id FROM `{FULL_PATH}.orders` WHERE member_id = @mid"
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("mid", "STRING", member_id)]
+        )
+        order_rows = bq.query(find_orders_query, job_config=job_config).result()
+        order_ids = [row.order_id for row in order_rows]
+
+        # Step 2: Delete from order_items (The most granular data)
+        if order_ids:
+            delete_items_query = f"DELETE FROM `{FULL_PATH}.order_items` WHERE order_id IN UNNEST(@oids)"
+            items_config = bigquery.QueryJobConfig(
+                query_parameters=[bigquery.ArrayQueryParameter("oids", "STRING", order_ids)]
+            )
+            bq.query(delete_items_query, job_config=items_config).result()
+
+        # Step 3: Delete from orders (The transaction headers)
+        delete_orders_query = f"DELETE FROM `{FULL_PATH}.orders` WHERE member_id = @mid"
+        bq.query(delete_orders_query, job_config=job_config).result()
+
+        # Step 4: Delete from members (The profile itself)
+        delete_member_query = f"DELETE FROM `{FULL_PATH}.members` WHERE id = @mid"
+        member_job = bq.query(delete_member_query, job_config=job_config)
+        member_job.result()
+
+        # Verification
+        if member_job.num_dml_affected_rows == 0:
+            raise HTTPException(status_code=404, detail="Member not found.")
+
+        return {
+            "status": "success",
+            "message": f"Member {member_id} and all associated records have been wiped.",
+            "records_scrubbed": {
+                "profile": 1,
+                "orders_deleted": len(order_ids)
+            }
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Deep delete failed: {str(e)}")
