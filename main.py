@@ -462,7 +462,7 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
     order_timestamp = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
     sales_tax_rate = 0.08
 
-    # 1. Lookup item details by ID instead of Name
+    # 1. Lookup item details by ID
     item_ids = [item.item_id for item in data.items]
     lookup_query = f"""
         SELECT id, name, size, price 
@@ -475,7 +475,6 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
     
     try:
         lookup_results = bq.query(lookup_query, job_config=job_config).result()
-        # Map by ID now to ensure we get the specific size/price combo
         menu_map = {row.id: {"name": row.name, "price": float(row.price), "size": row.size} for row in lookup_results}
         
         items_subtotal = 0.0
@@ -496,21 +495,17 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
                 "price": details['price']
             })
 
-        # 2. Background Calculations (Percentage Logic)
-        # We treat discount_amount as a whole number percentage (e.g., 10.0 = 10%)
-        discount_percent = float(data.discount_amount) if data.discount_amount else 0.0
+        # 2. Percentage Discount Logic
+        # Input 10.0 becomes 10%
+        input_percent = float(data.discount_amount) if data.discount_amount else 0.0
+        discount_dollars = round(items_subtotal * (input_percent / 100), 2)
         
-        # Calculate the actual dollar value of that percentage
-        discount_dollars = round(items_subtotal * (discount_percent / 100), 2)
-        
-        # New Subtotal after percentage is taken off
+        # Calculate Final Totals
         order_subtotal = round(max(0, items_subtotal - discount_dollars), 2)
-        
-        # Calculate 8% Sales Tax on the discounted subtotal
         sales_tax = round(order_subtotal * sales_tax_rate, 2)
         order_total = round(order_subtotal + sales_tax, 2)
 
-        # 3. Insert into ORDERS table (with CAST to handle NUMERIC columns)
+        # 3. Update ORDERS table
         order_insert_query = f"""
             INSERT INTO `{FULL_PATH}.orders` 
             (order_id, member_id, store_id, order_date, items_subtotal, order_discount, order_subtotal, sales_tax, order_total)
@@ -526,14 +521,14 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
             bigquery.ScalarQueryParameter("sid", "STRING", data.store_id),
             bigquery.ScalarQueryParameter("odate", "STRING", order_timestamp),
             bigquery.ScalarQueryParameter("i_sub", "FLOAT", items_subtotal),
-            bigquery.ScalarQueryParameter("disc", "FLOAT", discount),
+            bigquery.ScalarQueryParameter("disc", "FLOAT", discount_dollars), # Fixed variable name
             bigquery.ScalarQueryParameter("o_sub", "FLOAT", order_subtotal),
             bigquery.ScalarQueryParameter("tax", "FLOAT", sales_tax),
             bigquery.ScalarQueryParameter("total", "FLOAT", order_total),
         ]
         bq.query(order_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=order_params)).result()
 
-        # 4. Insert into ORDER_ITEMS table
+        # 4. Update ORDER_ITEMS table
         items_insert_query = f"INSERT INTO `{FULL_PATH}.order_items` (id, order_id, item_name, size, quantity, price) VALUES "
         placeholders = []
         item_params = [bigquery.ScalarQueryParameter("oid", "STRING", new_order_id)]
@@ -553,12 +548,14 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
         items_insert_query += ", ".join(placeholders)
         bq.query(items_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=item_params)).result()
 
+        # 5. Success Response
         return {
             "status": "success",
             "order_id": new_order_id,
             "summary": {
-                "subtotal": round(items_subtotal, 2),
-                "discount": round(discount, 2),
+                "items_subtotal": round(items_subtotal, 2),
+                "discount_percentage": f"{input_percent}%",
+                "discount_saved": round(discount_dollars, 2), # Fixed variable name
                 "tax": round(sales_tax, 2),
                 "total": round(order_total, 2)
             }
