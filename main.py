@@ -481,15 +481,27 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
         order_items_to_insert = []
         
         for requested_item in data.items:
+            # Check if the ID exists in our lookup results
             details = menu_map.get(requested_item.item_id)
-            # ... validation logic ...
+            
+            if not details:
+                # THIS IS THE FIX: Stop the code if the ID is missing
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"Item ID {requested_item.item_id} was not found in the menu table. Check your FULL_PATH or Project ID."
+                )
+            
+            # If found, do the math
+            price_val = details['price']
+            line_total = price_val * requested_item.quantity
+            items_subtotal += line_total
             
             order_items_to_insert.append({
-                "menu_item_id": requested_item.item_id, # Add this line!
+                "menu_item_id": requested_item.item_id,
                 "item_name": details['name'],
                 "size": details['size'],
                 "quantity": requested_item.quantity,
-                "price": details['price']
+                "price": price_val
             })
 
         # 2. Percentage Discount Logic
