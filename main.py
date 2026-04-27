@@ -445,9 +445,9 @@ def get_member_points(member_id: str, bq: bigquery.Client = Depends(get_bq_clien
         )
 
 # submitting orders
-# --- Input Models ---
+# --- Updated Input Model ---
 class OrderItemRequest(BaseModel):
-    item_name: str
+    item_id: str  # Changed from item_name to item_id for accuracy
     quantity: int
 
 class PlaceOrderRequest(BaseModel):
@@ -456,66 +456,60 @@ class PlaceOrderRequest(BaseModel):
     items: List[OrderItemRequest]
     discount_amount: Optional[float] = 0.0
 
-# --- The Place Order Endpoint ---
 @app.post("/orders", status_code=201)
 def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_client)):
     new_order_id = str(uuid.uuid4())
     order_timestamp = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
     sales_tax_rate = 0.08
 
-    item_names = [item.item_name for item in data.items]
+    # 1. Lookup item details by ID instead of Name
+    item_ids = [item.item_id for item in data.items]
     lookup_query = f"""
-        SELECT name, size, price 
+        SELECT id, name, size, price 
         FROM `{FULL_PATH}.menu_items` 
-        WHERE name IN UNNEST(@names)
+        WHERE id IN UNNEST(@ids)
     """
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ArrayQueryParameter("names", "STRING", item_names)]
+        query_parameters=[bigquery.ArrayQueryParameter("ids", "STRING", item_ids)]
     )
     
     try:
         lookup_results = bq.query(lookup_query, job_config=job_config).result()
-        
-        # --- THE FIX IS HERE ---
-        # We wrap row.price in float() to prevent the Decimal vs Float error
-        menu_map = {row.name: {"price": float(row.price), "size": row.size} for row in lookup_results}
+        # Map by ID now to ensure we get the specific size/price combo
+        menu_map = {row.id: {"name": row.name, "price": float(row.price), "size": row.size} for row in lookup_results}
         
         items_subtotal = 0.0
         order_items_to_insert = []
         
         for requested_item in data.items:
-            details = menu_map.get(requested_item.item_name)
+            details = menu_map.get(requested_item.item_id)
             if not details:
-                raise HTTPException(status_code=404, detail=f"Item '{requested_item.item_name}' not found.")
+                raise HTTPException(status_code=404, detail=f"Item ID '{requested_item.item_id}' not found.")
             
             line_total = details['price'] * requested_item.quantity
             items_subtotal += line_total
             
             order_items_to_insert.append({
-                "order_id": new_order_id,
-                "item_name": requested_item.item_name,
+                "item_name": details['name'],
                 "size": details['size'],
                 "quantity": requested_item.quantity,
                 "price": details['price']
             })
 
+        # 2. Background Calculations
         discount = float(data.discount_amount) if data.discount_amount else 0.0
         order_subtotal = round(max(0, items_subtotal - discount), 2)
-        # Using math.floor for tax to match Uncle Joe's point logic
         sales_tax = round(order_subtotal * sales_tax_rate, 2)
         order_total = round(order_subtotal + sales_tax, 2)
 
-        # Update ORDERS table with explicit CAST to NUMERIC
+        # 3. Insert into ORDERS table (with CAST to handle NUMERIC columns)
         order_insert_query = f"""
             INSERT INTO `{FULL_PATH}.orders` 
             (order_id, member_id, store_id, order_date, items_subtotal, order_discount, order_subtotal, sales_tax, order_total)
             VALUES (
                 @oid, @mid, @sid, @odate, 
-                CAST(@i_sub AS NUMERIC), 
-                CAST(@disc AS NUMERIC), 
-                CAST(@o_sub AS NUMERIC), 
-                CAST(@tax AS NUMERIC), 
-                CAST(@total AS NUMERIC)
+                CAST(@i_sub AS NUMERIC), CAST(@disc AS NUMERIC), 
+                CAST(@o_sub AS NUMERIC), CAST(@tax AS NUMERIC), CAST(@total AS NUMERIC)
             )
         """
         order_params = [
@@ -531,23 +525,17 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
         ]
         bq.query(order_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=order_params)).result()
 
-        # --- 5. Update the ORDER_ITEMS table ---
-        # Added 'id' to the column list below
+        # 4. Insert into ORDER_ITEMS table
         items_insert_query = f"INSERT INTO `{FULL_PATH}.order_items` (id, order_id, item_name, size, quantity, price) VALUES "
         placeholders = []
-        
         item_params = [bigquery.ScalarQueryParameter("oid", "STRING", new_order_id)]
         
         for i, item in enumerate(order_items_to_insert):
             suffix = f"_{i}"
-            # Added @iid{suffix} to the placeholders
             placeholders.append(f"(@iid{suffix}, @oid, @name{suffix}, @size{suffix}, @qty{suffix}, CAST(@price{suffix} AS NUMERIC))")
             
-            # Generate a unique ID for this specific line item
-            specific_line_item_id = str(uuid.uuid4())
-            
             item_params.extend([
-                bigquery.ScalarQueryParameter(f"iid{suffix}", "STRING", specific_line_item_id),
+                bigquery.ScalarQueryParameter(f"iid{suffix}", "STRING", str(uuid.uuid4())),
                 bigquery.ScalarQueryParameter(f"name{suffix}", "STRING", item['item_name']),
                 bigquery.ScalarQueryParameter(f"size{suffix}", "STRING", item['size']),
                 bigquery.ScalarQueryParameter(f"qty{suffix}", "INTEGER", item['quantity']),
@@ -555,10 +543,8 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
             ])
         
         items_insert_query += ", ".join(placeholders)
-
-        # Execute the items insert
         bq.query(items_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=item_params)).result()
-        
+
         return {
             "status": "success",
             "order_id": new_order_id,
@@ -571,5 +557,4 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
         }
 
     except Exception as e:
-        # This will now catch and show any other remaining issues
         raise HTTPException(status_code=500, detail=f"Order Failed: {str(e)}")
