@@ -531,21 +531,30 @@ def place_order(data: PlaceOrderRequest, bq: bigquery.Client = Depends(get_bq_cl
         ]
         bq.query(order_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=order_params)).result()
 
-        # Update ORDER_ITEMS table
+        # --- 5. Update the ORDER_ITEMS table ---
         items_insert_query = f"INSERT INTO `{FULL_PATH}.order_items` (order_id, item_name, size, quantity, price) VALUES "
         placeholders = []
+        
+        # Initialize item_params with the shared order_id
         item_params = [bigquery.ScalarQueryParameter("oid", "STRING", new_order_id)]
         
-        # Update ORDER_ITEMS table with explicit CAST to NUMERIC
-        # We update the placeholder string inside the loop
         for i, item in enumerate(order_items_to_insert):
             suffix = f"_{i}"
+            # Notice the CAST to NUMERIC here to keep BigQuery happy from the previous error
             placeholders.append(f"(@oid, @name{suffix}, @size{suffix}, @qty{suffix}, CAST(@price{suffix} AS NUMERIC))")
-            # ... (rest of the params code stays the same)
+            
+            # Add the specific values for THIS item to the params list
+            item_params.extend([
+                bigquery.ScalarQueryParameter(f"name{suffix}", "STRING", item['item_name']),
+                bigquery.ScalarQueryParameter(f"size{suffix}", "STRING", item['size']),
+                bigquery.ScalarQueryParameter(f"qty{suffix}", "INTEGER", item['quantity']),
+                bigquery.ScalarQueryParameter(f"price{suffix}", "FLOAT", item['price'])
+            ])
         
         items_insert_query += ", ".join(placeholders)
-        bq.query(items_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=item_params)).result()
 
+        # Execute the items insert
+        bq.query(items_insert_query, job_config=bigquery.QueryJobConfig(query_parameters=item_params)).result()
         return {
             "status": "success",
             "order_id": new_order_id,
